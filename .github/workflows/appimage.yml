@@ -1,0 +1,69 @@
+name: Build AppImage
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream release tag to repackage (leave empty for the newest release)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    if: github.repository != 'sonicnext-dev/MarathonRecomp'
+    runs-on: ubuntu-24.04
+    env:
+      UPSTREAM: sonicnext-dev/MarathonRecomp
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak binutils unzip
+
+      - name: Download official Flatpak release
+        id: fetch
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="$(gh api "repos/$UPSTREAM/releases?per_page=1" --jq '.[0].tag_name')"
+          fi
+          echo "Upstream release: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          ASSET="$(gh release view "$TAG" -R "$UPSTREAM" --json assets --jq '.assets[].name' \
+                   | grep -i flatpak | grep -viE 'arm|aarch64' | head -n1)"
+          [ -n "$ASSET" ] || { echo "No Flatpak asset in release $TAG"; gh release view "$TAG" -R "$UPSTREAM" --json assets --jq '.assets[].name'; exit 1; }
+          echo "Asset: $ASSET"
+
+          mkdir -p dl && cd dl
+          gh release download "$TAG" -R "$UPSTREAM" -p "$ASSET"
+          case "$ASSET" in
+            *.zip) unzip -o "$ASSET" ;;
+            *.tar.*|*.tgz) tar xf "$ASSET" ;;
+          esac
+          BUNDLE="$(find "$PWD" -name '*.flatpak' | head -n1)"
+          [ -n "$BUNDLE" ] || { echo "No .flatpak file found in $ASSET"; exit 1; }
+          echo "bundle=$BUNDLE" >> "$GITHUB_OUTPUT"
+
+      - name: Build AppImage
+        run: |
+          bash appimage/build-appimage.sh "${{ steps.fetch.outputs.bundle }}" \
+            "out/MarathonRecomp-${{ steps.fetch.outputs.tag }}-x86_64.AppImage"
+
+      - name: Publish release
+        run: |
+          TAG="appimage-${{ steps.fetch.outputs.tag }}"
+          FILE="$(ls out/*.AppImage)"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber
+          else
+            gh release create "$TAG" "$FILE" --target "${{ github.sha }}" \
+              --title "Marathon Recompiled ${{ steps.fetch.outputs.tag }} (AppImage)" \
+              --notes "Unofficial AppImage repackaged from the official Flatpak of [${{ steps.fetch.outputs.tag }}](https://github.com/${{ env.UPSTREAM }}/releases/tag/${{ steps.fetch.outputs.tag }}). Config, saves and installed game files go in a \`MarathonRecomp\` folder next to the AppImage."
+          fi

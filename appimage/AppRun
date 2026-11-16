@@ -1,0 +1,47 @@
+#!/bin/sh
+# Launcher for the Marathon Recompiled AppImage.
+#
+# Everything the game writes (config, saves, logs, and the game files copied by
+# the installer) goes into a "MarathonRecomp" folder next to the .AppImage file,
+# so the whole setup can be moved or copied as one folder.
+#
+# Set MARATHON_RECOMP_HOME to use a different parent folder instead.
+
+HERE="$(dirname "$(readlink -f "$0")")"
+
+if [ -n "${MARATHON_RECOMP_HOME:-}" ]; then
+    BASE="$MARATHON_RECOMP_HOME"
+elif [ -n "${APPIMAGE:-}" ]; then
+    BASE="$(dirname "$APPIMAGE")"
+else
+    BASE="$HERE"
+fi
+mkdir -p "$BASE"
+
+# The game puts its config in $XDG_CONFIG_HOME/MarathonRecomp and its installed
+# game files in $XDG_DATA_HOME/MarathonRecomp, so both end up in $BASE/MarathonRecomp.
+export XDG_CONFIG_HOME="$BASE"
+export XDG_DATA_HOME="$BASE"
+
+LIBS="$HERE/usr/lib"
+
+# A bundled copy of the C++ runtime is used only when the host's copy is too old,
+# because an older bundled copy can break the host's graphics drivers.
+REQ_FILE="$HERE/usr/lib/stdcxx-fallback/required-version"
+if [ -f "$REQ_FILE" ]; then
+    REQ="$(cat "$REQ_FILE")"
+    HOST_STDCXX=""
+    for LDCONFIG in ldconfig /sbin/ldconfig /usr/sbin/ldconfig; do
+        if command -v "$LDCONFIG" >/dev/null 2>&1; then
+            HOST_STDCXX="$("$LDCONFIG" -p 2>/dev/null | awk '/libstdc\+\+\.so\.6 .*x86-64/ { print $NF; exit }')"
+            break
+        fi
+    done
+    if [ -z "$HOST_STDCXX" ] || ! grep -qa "$REQ" "$HOST_STDCXX" 2>/dev/null; then
+        LIBS="$LIBS:$HERE/usr/lib/stdcxx-fallback"
+    fi
+fi
+
+export LD_LIBRARY_PATH="$LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+exec "$HERE/usr/bin/MarathonRecomp" "$@"
