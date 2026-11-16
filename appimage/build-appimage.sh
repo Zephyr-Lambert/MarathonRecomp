@@ -42,23 +42,37 @@ SEARCH_PATH="$APP_FILES/lib:$RT_LIBDIR:$RT_FILES/lib"
 # display/audio/desktop stacks (bundling these breaks GPUs or desktop integration).
 EXCLUDE='^(ld-linux|libc\.|libm\.|libmvec|libdl\.|libpthread|librt\.|libresolv|libutil|libnsl|libanl|libBrokenLocale|libGL|libGLX|libEGL|libGLdispatch|libOpenGL|libGLES|libvulkan|libdrm|libgbm|libX|libxcb|libxkbcommon|libwayland|libdecor|libgtk|libgdk|libglib|libgobject|libgio|libgmodule|libgthread|libpango|libcairo|libharfbuzz|libfontconfig|libfreetype|libatk|libatspi|libepoxy|libdbus|libasound|libpulse|libpipewire|libjack|libudev|libsystemd|libselinux|libmount|libblkid|libffi|libpcre2|libz\.|libexpat|libuuid)'
 
-echo "::group::Library dependencies"
-LIST="$("$LOADER" --library-path "$SEARCH_PATH" --list "$APPDIR/usr/bin/MarathonRecomp")"
-echo "$LIST"
+echo "::group::Full library tree (for reference)"
+"$LOADER" --library-path "$SEARCH_PATH" --list "$APPDIR/usr/bin/MarathonRecomp" || true
 echo "::endgroup::"
-if echo "$LIST" | grep -q "not found"; then
-    echo "Some libraries could not be resolved:"; echo "$LIST" | grep "not found"; exit 1
-fi
 
-echo "$LIST" | awk '/=> \// { print $1, $3 }' | while read -r NAME PATH_; do
+find_lib() {
+    local IFS=:
+    for d in $SEARCH_PATH; do
+        if [ -e "$d/$1" ]; then echo "$d/$1"; return 0; fi
+    done
+    return 1
+}
+needed() { objdump -p "$1" | awk '/NEEDED/ { print $2 }'; }
+
+# Walk the dependency tree, but don't descend into host libraries:
+# their own dependencies are provided by the host as well.
+declare -A SEEN=()
+QUEUE=($(needed "$APPDIR/usr/bin/MarathonRecomp"))
+while [ ${#QUEUE[@]} -gt 0 ]; do
+    NAME="${QUEUE[0]}"; QUEUE=("${QUEUE[@]:1}")
+    [ -n "${SEEN[$NAME]:-}" ] && continue
+    SEEN[$NAME]=1
     if [[ "$NAME" =~ ^(libstdc\+\+|libgcc_s) ]]; then
-        cp -L "$PATH_" "$APPDIR/usr/lib/stdcxx-fallback/$NAME"
+        cp -L "$(find_lib "$NAME")" "$APPDIR/usr/lib/stdcxx-fallback/$NAME"
         echo "fallback: $NAME"
     elif [[ "$NAME" =~ $EXCLUDE ]]; then
         echo "host:     $NAME"
     else
-        cp -L "$PATH_" "$APPDIR/usr/lib/$NAME"
+        SRC="$(find_lib "$NAME")" || { echo "Cannot find $NAME"; exit 1; }
+        cp -L "$SRC" "$APPDIR/usr/lib/$NAME"
         echo "bundled:  $NAME"
+        QUEUE+=($(needed "$SRC"))
     fi
 done
 
@@ -71,7 +85,7 @@ if [ -n "$REQ_STDCXX" ] && ls "$APPDIR/usr/lib/stdcxx-fallback/"libstdc++* >/dev
 else
     rm -rf "$APPDIR/usr/lib/stdcxx-fallback"
 fi
-REQ_GLIBC="$(objdump -T "$APPDIR/usr/bin/MarathonRecomp" "$APPDIR"/usr/lib/*.so* 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -n1)"
+REQ_GLIBC="$(objdump -T "$APPDIR/usr/bin/MarathonRecomp" "$APPDIR"/usr/lib/*.so* 2>/dev/null | grep -o "GLIBC_[0-9.]*" | sort -Vu | tail -n1 || true)"
 echo "Requires host glibc: $REQ_GLIBC   C++ runtime: ${REQ_STDCXX:-none}"
 
 # --- AppImage metadata -------------------------------------------------------------
